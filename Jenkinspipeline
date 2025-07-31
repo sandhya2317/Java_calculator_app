@@ -1,0 +1,87 @@
+pipeline {
+    agent any
+
+    tools {
+        jdk 'jdk-17'
+        maven 'maven'
+    }
+
+    environment {
+        DOCKER_REPO = "sandhya234/java-webapp"
+        IMAGE_TAG = "${BUILD_NUMBER}"
+    }
+
+    stages {
+        stage('Git Checkout') {
+            steps {
+                checkout scmGit(
+                    branches: [[name: '*/main']],
+                    extensions: [],
+                    userRemoteConfigs: [[url: 'https://github.com/sandhya2317/Java_calculator_app.git']]
+                )
+            }
+        }
+
+        stage('Maven Build') {
+            steps {
+                sh 'mvn clean package'
+            }
+        }
+
+        stage('Archive Artifact') {
+            steps {
+                archiveArtifacts artifacts: 'target/*.war', fingerprint: true
+            }
+        }
+
+        stage('Docker Build & Push to Docker Hub') {
+            steps {
+                script {
+                    echo " Logging into Docker Hub and pushing image: ${DOCKER_REPO}:${IMAGE_TAG}"
+                    docker.withRegistry('https://index.docker.io/v1/', 'DockerHub-Credentials') {
+                        def image = docker.build("${DOCKER_REPO}:${IMAGE_TAG}")
+                        image.push()
+                    }
+                }
+            }
+        }
+
+        stage('Docker Run Locally') {
+            steps {
+                script {
+                    sh '''
+                        docker stop java_app || true
+                        docker rm java_app || true
+                        docker run -d -p 8081:8080 --name java_app ${DOCKER_REPO}:${IMAGE_TAG}
+                    '''
+                }
+            }
+        }
+        stage('Deploy to Kops Cluster') {
+    steps {
+        withCredentials([
+            file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG'),
+            usernamePassword(credentialsId: 'aws-creds', usernameVariable: 'AWS_ACCESS_KEY_ID', passwordVariable: 'AWS_SECRET_ACCESS_KEY')
+        ]) {
+            sh '''
+                export AWS_DEFAULT_REGION=us-east-1
+                sed -i "s|my_image|${DOCKER_REPO}:${IMAGE_TAG}|g" k8s/deployment.yaml
+                kubectl apply -f k8s/deployment.yaml
+                kubectl apply -f k8s/service.yaml
+                kubectl get pods
+                kubectl get svc
+            '''
+        }
+    }
+}
+    }
+
+    post {
+        success {
+            echo "Pipeline execution completed successfully!"
+        }
+        failure {
+            echo "Pipeline failed. Please check the logs for errors."
+        }
+    }
+}
